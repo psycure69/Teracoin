@@ -7,8 +7,8 @@ import json
 import os
 from datetime import datetime
 
-# Lê a porta dinâmica fornecida pelo Railway (ou usa 5000 como padrão local)
-PORTA_LOCAL = int(os.environ.get("PORT", 5000))
+# Configurado para Fly.io — porta fixa 8080
+PORTA_LOCAL = 8080
 
 TEMPO_ALVO_MIN = 120.0  # 2 minutos
 TEMPO_ALVO_MAX = 300.0  # 5 minutos
@@ -310,7 +310,7 @@ def iniciar_servidor_p2p(rede_teracoin):
 
 
 if __name__ == "__main__":
-    log("=== REDE TERACOIN (TRC) - MODO RAILWAY (META 2 A 5 MIN) ===")
+    log("=== REDE TERACOIN (TRC) — FLY.IO — META 2 A 5 MIN ===")
 
     teracoin_rede = TeracoinRede(dificuldade_inicial=4)
 
@@ -338,3 +338,4 @@ if __name__ == "__main__":
             time.sleep(INTERVALO_CICLO_SERVIDOR)
     except KeyboardInterrupt:
         log("[Teracoin] Encerramento solicitado. Até logo!")
+
