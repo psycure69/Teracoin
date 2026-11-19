@@ -6,6 +6,7 @@ import threading
 import json
 import os
 from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # Configurado para Fly.io — porta fixa 8080
 PORTA_LOCAL = 8080
@@ -23,6 +24,26 @@ EMISSAO_MAXIMA = 50_000_000.0  # teto máximo de 50 milhões de TRC
 def log(mensagem):
     agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{agora}] {mensagem}", flush=True)
+
+
+class ServidorWebSimples(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html; charset=utf-8")
+        self.end_headers()
+        html = """
+        <html>
+            <body style="background:#111;color:#0f0;font-family:Arial;text-align:center;margin-top:80px">
+                <h1>✅ NÓ TERACOIN ATIVO!</h1>
+                <p>A blockchain está rodando e minerando normalmente!</p>
+            </body>
+        </html>
+        """
+        self.wfile.write(html.encode("utf-8"))
+
+def iniciar_servidor_web():
+    servidor = HTTPServer(("0.0.0.0", PORTA_LOCAL), ServidorWebSimples)
+    servidor.serve_forever()
 
 
 class Carteira:
@@ -294,7 +315,7 @@ def iniciar_servidor_p2p(rede_teracoin):
     servidor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     servidor.bind(("0.0.0.0", PORTA_LOCAL))
     servidor.listen(5)
-    log(f"[Servidor Teracoin] A escutar na porta {PORTA_LOCAL}...")
+    log(f"[Servidor P2P Teracoin] A escutar na porta {PORTA_LOCAL}...")
 
     while True:
         cliente_socket, _ = servidor.accept()
@@ -314,6 +335,12 @@ if __name__ == "__main__":
 
     teracoin_rede = TeracoinRede(dificuldade_inicial=4)
 
+    # Thread do Servidor Web (resolve o erro 502 do Fly.io)
+    thread_web = threading.Thread(target=iniciar_servidor_web, daemon=True)
+    thread_web.start()
+    log("[Web] ✅ Servidor HTTP iniciado na porta 8080!")
+
+    # Thread do Servidor P2P da blockchain
     thread_p2p = threading.Thread(
         target=iniciar_servidor_p2p, args=(teracoin_rede,), daemon=True
     )
@@ -338,4 +365,3 @@ if __name__ == "__main__":
             time.sleep(INTERVALO_CICLO_SERVIDOR)
     except KeyboardInterrupt:
         log("[Teracoin] Encerramento solicitado. Até logo!")
-
