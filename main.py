@@ -1,367 +1,204 @@
 import hashlib
-import time
-import random
-import socket
-import threading
 import json
+import time
 import os
-from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
+import socket
+import pickle
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+from collections import OrderedDict
 
-# Configurado para Fly.io — porta fixa 8080
-PORTA_LOCAL = 8080
-
-TEMPO_ALVO_MIN = 120.0  # 2 minutos
-TEMPO_ALVO_MAX = 300.0  # 5 minutos
-DIFICULDADE_MINIMA = 3
-INTERVALO_CICLO_SERVIDOR = 5  # segundos entre ciclos no modo contínuo
-
-RECOMPENSA_INICIAL = 50.0
-INTERVALO_HALVING_EMISSAO = 10_000_000.0  # reduz pela metade a cada 10 milhões de TRC
-EMISSAO_MAXIMA = 50_000_000.0  # teto máximo de 50 milhões de TRC
-
+PORTA_LOCAL = int(os.getenv("PORT", 8080))
+PORTA_P2P = 5000
+PEERS = []
 
 def log(mensagem):
-    agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{agora}] {mensagem}", flush=True)
+    print(f"[{time.ctime()}] {mensagem}")
 
+class Transacao:
+    def __init__(self, remetente, destinatario, valor, assinatura=""):
+        self.remetente = remetente
+        self.destinatario = destinatario
+        self.valor = valor
+        self.assinatura = assinatura
+        self.tempo = time.time()
 
-class ServidorWebSimples(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/html; charset=utf-8")
-        self.end_headers()
-        html = """
-        <html>
-            <body style="background:#111;color:#0f0;font-family:Arial;text-align:center;margin-top:80px">
-                <h1>✅ NÓ TERACOIN ATIVO!</h1>
-                <p>A blockchain está rodando e minerando normalmente!</p>
-            </body>
-        </html>
-        """
-        self.wfile.write(html.encode("utf-8"))
+    def para_dict(self):
+        return OrderedDict({
+            "remetente": self.remetente,
+            "destinatario": self.destinatario,
+            "valor": self.valor,
+            "assinatura": self.assinatura,
+            "tempo": self.tempo
+        })
 
-def iniciar_servidor_web():
-    servidor = HTTPServer(("0.0.0.0", PORTA_LOCAL), ServidorWebSimples)
-    servidor.serve_forever()
-
-
-class Carteira:
-    def __init__(self, chave_personalizada=None):
-        self.chave_privada = (
-            chave_personalizada
-            if chave_personalizada
-            else str(random.randint(1000000000, 9999999999))
-        )
-        self.endereco = hashlib.sha256(self.chave_privada.encode()).hexdigest()[:20]
-
-    def assinar_transacao(self, dados_transacao):
-        mensagem = dados_transacao + self.chave_privada
-        return hashlib.sha256(mensagem.encode()).hexdigest()
-
-
-def verificar_assinatura(endereco_publico, dados_transacao, assinatura, chave_privada_teste):
-    verif_endereco = hashlib.sha256(chave_privada_teste.encode()).hexdigest()[:20]
-    mensagem = dados_transacao + chave_privada_teste
-    verif_assinatura = hashlib.sha256(mensagem.encode()).hexdigest()
-    return verif_endereco == endereco_publico and verif_assinatura == assinatura
-
+    def gerar_hash(self):
+        return hashlib.sha256(json.dumps(self.para_dict(), sort_keys=True).encode()).hexdigest()
 
 class Bloco:
-    def __init__(self, indice, transacoes, timestamp, hash_anterior):
+    def __init__(self, indice, transacoes, hash_anterior):
         self.indice = indice
         self.transacoes = transacoes
-        self.timestamp = timestamp
         self.hash_anterior = hash_anterior
         self.nonce = 0
-        self.hash = self.calcular_hash()
+        self.tempo = time.time()
+        self.hash = ""
 
     def calcular_hash(self):
-        dados_bloco = f"{self.indice}{str(self.transacoes)}{self.timestamp}{self.hash_anterior}{self.nonce}"
-        return hashlib.sha256(dados_bloco.encode()).hexdigest()
+        return hashlib.sha256(f"{self.indice}{self.transacoes}{self.hash_anterior}{self.nonce}{self.tempo}".encode()).hexdigest()
 
-    def minerar_bloco(self, dificuldade):
+    def minerar(self, dificuldade):
         alvo = "0" * dificuldade
-        log(f"[Teracoin] A minerar o Bloco #{self.indice} (alvo: {alvo}...)...")
-        inicio = time.time()
-        while self.hash[:dificuldade] != alvo:
+        while self.calcular_hash()[:dificuldade] != alvo:
             self.nonce += 1
-            self.hash = self.calcular_hash()
-        duracao = time.time() - inicio
-        log(f"[Sucesso] Bloco #{self.indice} minerado! Hash: {self.hash}")
-        log(f"[Teracoin] Nonce: {self.nonce} | Tempo: {duracao:.2f}s")
-        return duracao
+        self.hash = self.calcular_hash()
 
-
-class TeracoinRede:
-    def __init__(self, dificuldade_inicial=4):
+class Blockchain:
+    def __init__(self, dificuldade=6, recompensa=50.0):
         self.cadeia = []
         self.transacoes_pendentes = []
-        self.dificuldade = max(DIFICULDADE_MINIMA, dificuldade_inicial)
-        self.conexoes_conhecidas = []
-        self.lock = threading.Lock()
-        self.criar_bloco_genesis()
+        self.dificuldade = dificuldade
+        self.recompensa = recompensa
+        self.criar_bloco_genese()
 
-    def criar_bloco_genesis(self):
-        bloco_g = Bloco(
-            0,
-            [{"tipo": "GENESIS", "detalhes": "Lançamento oficial da rede Teracoin"}],
-            time.time(),
-            "0",
-        )
-        self.cadeia.append(bloco_g)
+    def criar_bloco_genese(self):
+        bloco = Bloco(0, [], "0")
+        bloco.minerar(self.dificuldade)
+        self.cadeia.append(bloco)
 
-    def obter_ultimo_bloco(self):
+    def ultimo_bloco(self):
         return self.cadeia[-1]
 
-    def total_emitido(self):
-        emitido = 0.0
+    def adicionar_transacao(self, tx):
+        self.transacoes_pendentes.append(tx)
+
+    def obter_saldo(self, endereco):
+        saldo = 0.0
         for bloco in self.cadeia:
             for tx in bloco.transacoes:
-                if tx.get("tipo") == "RECOMPENSA":
-                    emitido += float(tx.get("valor", 0.0))
-        return emitido
+                if tx.destinatario == endereco:
+                    saldo += tx.valor
+                if tx.remetente == endereco:
+                    saldo -= tx.valor
+        return saldo
 
-    def calcular_recompensa_atual(self):
-        emitido = self.total_emitido()
-        restante_teto = max(0.0, EMISSAO_MAXIMA - emitido)
-        if restante_teto <= 0.0:
-            return 0.0
+    def minerar_bloco_pendente(self, endereco_minerador):
+        tx_recompensa = Transacao("SISTEMA", endereco_minerador, self.recompensa)
+        todas_tx = [tx_recompensa] + self.transacoes_pendentes
+        novo_bloco = Bloco(len(self.cadeia), todas_tx, self.ultimo_bloco().hash)
 
-        faixas_concluidas = int(emitido // INTERVALO_HALVING_EMISSAO)
-        recompensa = RECOMPENSA_INICIAL / (2 ** faixas_concluidas)
-        return round(min(recompensa, restante_teto), 8)
+        inicio = time.time()
+        novo_bloco.minerar(self.dificuldade)
+        tempo_gasto = time.time() - inicio
 
-    def ajustar_dificuldade(self, tempo_gasto):
-        if tempo_gasto < 10.0:
-            self.dificuldade += 2
-            log(
-                f"[Dificuldade] Bloco muito rápido ({tempo_gasto:.2f}s). "
-                f"Subiu +2 -> Nova dificuldade: {self.dificuldade}"
-            )
-        elif tempo_gasto < TEMPO_ALVO_MIN:
-            self.dificuldade += 1
-            log(
-                f"[Dificuldade] Abaixo de 2 min ({tempo_gasto:.2f}s). "
-                f"Subiu +1 -> Nova dificuldade: {self.dificuldade}"
-            )
-        elif tempo_gasto > TEMPO_ALVO_MAX and self.dificuldade > DIFICULDADE_MINIMA:
-            self.dificuldade -= 1
-            log(
-                f"[Dificuldade] Acima de 5 min ({tempo_gasto:.2f}s). "
-                f"Desceu -1 -> Nova dificuldade: {self.dificuldade}"
-            )
-        else:
-            log(
-                f"[Dificuldade] Dentro da meta de 2–5 min ({tempo_gasto:.2f}s). "
-                f"Dificuldade mantida em {self.dificuldade}"
-            )
+        self.cadeia.append(novo_bloco)
+        self.transacoes_pendentes = []
+        return novo_bloco, tempo_gasto
 
-    def calcular_saldo(self, endereco_carteira):
-        with self.lock:
-            saldo = 0.0
-            for bloco in self.cadeia:
-                for tx in bloco.transacoes:
-                    if tx.get("tipo") == "RECOMPENSA" and tx.get("minerador") == endereco_carteira:
-                        saldo += float(tx.get("valor", 0.0))
-                    if tx.get("remetente") == endereco_carteira:
-                        saldo -= float(tx.get("valor", 0.0))
-                    if tx.get("destinatario") == endereco_carteira:
-                        saldo += float(tx.get("valor", 0.0))
-            return round(saldo, 8)
-
-    def saldo_disponivel_para_envio(self, endereco_carteira):
-        saldo = self.calcular_saldo(endereco_carteira)
-        with self.lock:
-            for tx in self.transacoes_pendentes:
-                if tx.get("remetente") == endereco_carteira:
-                    saldo -= float(tx.get("valor", 0.0))
-        return round(saldo, 8)
-
-    def criar_transacao(self, carteira_remetente, endereco_destinatario, valor):
-        if valor <= 0:
-            log("[Erro] O valor da transferência deve ser maior que zero.")
-            return False
-
-        if endereco_destinatario == carteira_remetente.endereco:
-            log("[Erro] Não é possível enviar TRC para a mesma carteira.")
-            return False
-
-        disponivel = self.saldo_disponivel_para_envio(carteira_remetente.endereco)
-        if disponivel < valor:
-            log(
-                f"[Rejeitada] Saldo insuficiente! Disponível: {disponivel} TRC | Tentativa: {valor} TRC"
-            )
-            return False
-
-        payload = f"{carteira_remetente.endereco}->{endereco_destinatario}:{valor}"
-        assinatura = carteira_remetente.assinar_transacao(payload)
-
-        if not verificar_assinatura(
-            carteira_remetente.endereco,
-            payload,
-            assinatura,
-            carteira_remetente.chave_privada,
-        ):
-            log("[Rejeitada] Assinatura inválida.")
-            return False
-
-        tx = {
-            "tipo": "TRANSFERENCIA",
-            "remetente": carteira_remetente.endereco,
-            "destinatario": endereco_destinatario,
-            "valor": valor,
-            "payload": payload,
-            "assinatura": assinatura,
-        }
-        with self.lock:
-            self.transacoes_pendentes.append(tx)
-        log(f"[Mempool] Transação adicionada à fila: {valor} TRC para {endereco_destinatario[:10]}...")
+    def cadeia_valida(self):
+        anterior = self.cadeia[0]
+        i = 1
+        while i < len(self.cadeia):
+            atual = self.cadeia[i]
+            if atual.hash_anterior != anterior.hash:
+                return False
+            if atual.calcular_hash() != atual.hash:
+                return False
+            anterior = atual
+            i += 1
         return True
 
-    def minerar_bloco_com_recompensa(self, endereco_minerador):
-        with self.lock:
-            recompensa_atual = self.calcular_recompensa_atual()
-            transacoes_do_bloco = list(self.transacoes_pendentes)
-            if recompensa_atual > 0:
-                transacoes_do_bloco.append(
-                    {
-                        "tipo": "RECOMPENSA",
-                        "minerador": endereco_minerador,
-                        "valor": recompensa_atual,
-                    }
-                )
-            else:
-                log("[Emissão] Teto de 50.000.000 TRC atingido. Bloco sem emissão de novas moedas.")
+TERACOIN = Blockchain(dificuldade=6, recompensa=50.0)
+CARTEIRA_CRIADOR = "7d87d90f077cf4a5dc6a"
 
-            ultimo_bloco = self.obter_ultimo_bloco()
-            indice_novo = len(self.cadeia)
-            hash_ant = ultimo_bloco.hash
-            dif_atual = self.dificuldade
+class ServidorWebSimples(SimpleHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        saldo = TERACOIN.obter_saldo(CARTEIRA_CRIADOR)
+        pagina = f"""
+        <html>
+        <head>
+            <title>Teracoin — Carteira</title>
+        </head>
+        <body style="background:#111;color:#fff;padding:30px;font-family:Arial">
+            <h1>⛏️ TERACOIN (TRC)</h1>
+            <h2>Saldo: <span style="color:#0f0">{saldo:.2f} TRC</span></h2>
+            <p>Blocos: {len(TERACOIN.cadeia)}</p>
+            <p>Dificuldade: {TERACOIN.dificuldade}</p>
+            <p>Carteira: {CARTEIRA_CRIADOR}</p>
+        </body>
+        </html>
+        """
+        self.wfile.write(pagina.encode("utf-8"))
 
-        novo_bloco = Bloco(
-            indice=indice_novo,
-            transacoes=transacoes_do_bloco,
-            timestamp=time.time(),
-            hash_anterior=hash_ant,
-        )
+def iniciar_servidor_web():
+    try:
+        servidor = HTTPServer(("0.0.0.0", PORTA_LOCAL), ServidorWebSimples)
+        log(f"✅ Servidor Web na porta {PORTA_LOCAL}")
+        servidor.serve_forever()
+    except Exception as e:
+        log(f"❌ Erro Web: {e}")
 
-        tempo_gasto = novo_bloco.minerar_bloco(dif_atual)
-
-        with self.lock:
-            if self.obter_ultimo_bloco().hash == hash_ant and novo_bloco.hash.startswith(
-                "0" * self.dificuldade
-            ):
-                self.cadeia.append(novo_bloco)
-                txs_incluidas = [t for t in transacoes_do_bloco if t.get("tipo") == "TRANSFERENCIA"]
-                for tx_inc in txs_incluidas:
-                    if tx_inc in self.transacoes_pendentes:
-                        self.transacoes_pendentes.remove(tx_inc)
-                self.ajustar_dificuldade(tempo_gasto)
-                bloco_para_enviar = novo_bloco
-            else:
-                log("[Teracoin] Bloco descartado: a cadeia avançou durante a mineração.")
-                return
-
-        self.transmitir_bloco(bloco_para_enviar)
-
-    def transmitir_bloco(self, bloco):
-        dados_bloco = json.dumps(
-            {
-                "indice": bloco.indice,
-                "transacoes": bloco.transacoes,
-                "timestamp": bloco.timestamp,
-                "hash_anterior": bloco.hash_anterior,
-                "nonce": bloco.nonce,
-                "hash": bloco.hash,
-            }
-        )
-
-        for ip in self.conexoes_conhecidas:
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(5)
-                s.connect((ip, PORTA_LOCAL))
-                s.send(dados_bloco.encode("utf-8"))
-                s.close()
-                log(f"[P2P] Bloco enviado para o nó {ip}")
-            except Exception as e:
-                log(f"[Erro P2P] Falha ao enviar para {ip}: {e}")
-
-    def adicionar_bloco_recebido(self, novo_bloco_dict):
-        bloco = Bloco(
-            novo_bloco_dict["indice"],
-            novo_bloco_dict["transacoes"],
-            novo_bloco_dict["timestamp"],
-            novo_bloco_dict["hash_anterior"],
-        )
-        bloco.nonce = novo_bloco_dict["nonce"]
-        bloco.hash = novo_bloco_dict["hash"]
-
-        with self.lock:
-            ultimo_bloco = self.obter_ultimo_bloco()
-            if bloco.hash_anterior == ultimo_bloco.hash and bloco.hash.startswith(
-                "0" * self.dificuldade
-            ):
-                self.cadeia.append(bloco)
-                log(f"[Rede Teracoin] Bloco #{bloco.indice} sincronizado com sucesso!")
-                return True
-            log("[Rede Teracoin] Bloco rejeitado por falha de validação.")
-            return False
-
-
-def iniciar_servidor_p2p(rede_teracoin):
+def iniciar_servidor_p2p():
     servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     servidor.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    servidor.bind(("0.0.0.0", PORTA_LOCAL))
+    servidor.bind(("0.0.0.0", PORTA_P2P))
     servidor.listen(5)
-    log(f"[Servidor P2P Teracoin] A escutar na porta {PORTA_LOCAL}...")
+    log(f"🌐 P2P escutando na porta {PORTA_P2P}")
 
     while True:
-        cliente_socket, _ = servidor.accept()
         try:
-            dados = cliente_socket.recv(4096).decode("utf-8")
+            conn, addr = servidor.accept()
+            dados = conn.recv(8192)
             if dados:
-                bloco_dict = json.loads(dados)
-                rede_teracoin.adicionar_bloco_recebido(bloco_dict)
+                msg = pickle.loads(dados)
+                if msg["tipo"] == "cadeia":
+                    nova_cadeia = msg["cadeia"]
+                    if len(nova_cadeia) > len(TERACOIN.cadeia) and TERACOIN.cadeia_valida():
+                        TERACOIN.cadeia = nova_cadeia
+                        log("[P2P] Cadeia atualizada!")
+            conn.close()
         except Exception as e:
-            log(f"[Erro P2P] Falha ao processar dados recebidos: {e}")
-        finally:
-            cliente_socket.close()
+            log(f"[P2P Erro] {e}")
 
+def transmitir_para_peers():
+    dados = {
+        "tipo": "cadeia",
+        "cadeia": TERACOIN.cadeia
+    }
+    for ip in PEERS:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.connect((ip, PORTA_P2P))
+            s.send(pickle.dumps(dados))
+            s.close()
+        except Exception as e:
+            log(f"[P2P Falha] {ip}: {e}")
+
+def minerador_loop():
+    global TERACOIN
+    while True:
+        log("\n⛏️ Minerando bloco...")
+        bloco, tempo = TERACOIN.minerar_bloco_pendente(CARTEIRA_CRIADOR)
+
+        # ✅ AJUSTE AUTOMÁTICO DE DIFICULDADE DE VOLTA
+        if tempo < 120:
+            TERACOIN.dificuldade += 1
+            log(f"📈 Dificuldade subiu para {TERACOIN.dificuldade}")
+        elif tempo > 180 and TERACOIN.dificuldade > 1:
+            TERACOIN.dificuldade -= 1
+            log(f"📉 Dificuldade desceu para {TERACOIN.dificuldade}")
+
+        saldo = TERACOIN.obter_saldo(CARTEIRA_CRIADOR)
+        log(f"✅ Bloco #{bloco.indice} minerado! Hash: {bloco.hash}")
+        log(f"[Teracoin] Nonce: {bloco.nonce} | Tempo: {tempo:.2f}s")
+        log(f"💰 Saldo Criador: {saldo:.2f} TRC")
+
+        transmitir_para_peers()
 
 if __name__ == "__main__":
-    log("=== REDE TERACOIN (TRC) — FLY.IO — META 2 A 5 MIN ===")
-
-    teracoin_rede = TeracoinRede(dificuldade_inicial=4)
-
-    # Thread do Servidor Web (resolve o erro 502 do Fly.io)
-    thread_web = threading.Thread(target=iniciar_servidor_web, daemon=True)
-    thread_web.start()
-    log("[Web] ✅ Servidor HTTP iniciado na porta 8080!")
-
-    # Thread do Servidor P2P da blockchain
-    thread_p2p = threading.Thread(
-        target=iniciar_servidor_p2p, args=(teracoin_rede,), daemon=True
-    )
-    thread_p2p.start()
-
-    carteira_criador = Carteira(chave_personalizada="chave_mestra_criador_teracoin")
-    log(f"[Carteira Criador] Endereço ativo: {carteira_criador.endereco}")
-
-    try:
-        while True:
-            teracoin_rede.minerar_bloco_com_recompensa(carteira_criador.endereco)
-            saldo_atual = teracoin_rede.calcular_saldo(carteira_criador.endereco)
-            emitido_total = teracoin_rede.total_emitido()
-            prox_recompensa = teracoin_rede.calcular_recompensa_atual()
-            log(
-                f"[Status] Blocos: {len(teracoin_rede.cadeia)} | "
-                f"Emitido: {emitido_total}/{EMISSAO_MAXIMA:.0f} TRC | "
-                f"Próx. recompensa: {prox_recompensa} TRC | "
-                f"Saldo Criador: {saldo_atual} TRC | "
-                f"Dificuldade: {teracoin_rede.dificuldade}"
-            )
-            time.sleep(INTERVALO_CICLO_SERVIDOR)
-    except KeyboardInterrupt:
-        log("[Teracoin] Encerramento solicitado. Até logo!")
+    threading.Thread(target=iniciar_servidor_web, daemon=True).start()
+    threading.Thread(target=iniciar_servidor_p2p, daemon=True).start()
+    minerador_loop()
