@@ -1,3 +1,5 @@
+# Deploy pelo GitHub Actions - 2026
+
 import hashlib
 import json
 import time
