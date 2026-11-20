@@ -1,3 +1,4 @@
+# Versão Nova Teracoin - Deploy Final
 # Deploy pelo GitHub Actions - 2026
 
 import hashlib
