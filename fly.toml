@@ -9,11 +9,6 @@ kill_timeout = "30s"
 
 [env]
   PORT = "8080"
-  DATA_DIR = "/data"
-
-[mounts]
-  source = "teracoin_data"
-  destination = "/data"
 
 [http_service]
   internal_port = 8080
